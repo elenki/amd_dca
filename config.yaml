@@ -1,0 +1,78 @@
+# Configuration for AMD RNA-Seq Denoising Autoencoder Project
+
+# --- Paths ---
+# Assumes data is relative to the project root directory
+# project_root: ".." # Relative path to the project root
+# data_dir: "{project_root}/data" # Directory for all data files
+# raw_data_dir: "{data_dir}/raw"
+# processed_data_dir: "{data_dir}/processed"
+# results_dir: "{project_root}/results" # Directory for all results
+# log_dir: "{project_root}/logs" # Directory for all logs
+# model_save_dir: "{results_dir}/models"
+# plot_save_dir: "{results_dir}/plots"
+
+# --- Datasets ---
+# List datasets to process
+datasets:
+  gse115828:
+    counts_file: "GSE115828_RSEM_gene_counts.tsv"
+    metadata_file: "GSE115828_metadata.csv"
+  
+# --- Preprocessing Parameters ---
+preprocessing:
+  min_counts_per_gene: 10 # Minimum count threshold for genes
+  min_samples_per_gene_pct: 0.1 # Minimum percentage of samples a gene must be present in
+  rin_threshold: 6.0 # Minimum RIN score for samples
+  gene_cols_prefix: "ENSG" # Prefix for gene columns in the counts file
+  metadata_cols:
+    - "age"
+    - "sex"
+    - "mgs_level"
+    - "postmortem_interval_hrs"
+    - "rin"
+  split_ratios: # Train, Validation, Test. TODO: Adjust based on final model architecture
+    train: 0.70
+    validation: 0.15
+    test: 0.15
+  stratify_on: "mgs_level" 
+  covariates: 
+    - "age"
+    - "sex"
+    - "rin"
+    - "postmortem_interval_hrs"
+
+# --- Model Architecture ---
+model:
+  # TODO: Choose 'NB' or 'ZINB'
+  distribution: "NB"
+  # TODO: Example layer sizes (need to tune these!)
+  encoder_layers: [512, 128]
+  bottleneck_size: 64
+  decoder_layers: [128, 512]
+  # Activation functions
+  activation: "relu"
+  # TODO: Output activations determined by distribution ('exp', 'sigmoid') - ?
+
+# --- Training Hyperparameters ---
+training:
+  # Input scaling: 'log1p', 'size_factor_log1p', 'none'
+  # choosing "none" for now to avoid scaling issues with ZINB
+  input_scaling: "none"
+  learning_rate: 0.0001
+  batch_size: 64
+  epochs: 200
+  validation_split: 0.0 # Use separate validation set defined in preprocessing
+  early_stopping_patience: 15 # Stop if validation loss doesn't improve
+  optimizer: "adam"
+  # Regularization (e.g., dropout rate, L1/L2 penalty)
+  dropout_rate: 0.1
+
+# --- Evaluation ---
+evaluation:
+  # Metrics to calculate, plots to generate
+  plot_formats: ["png", "svg"]
+
+# --- Environment ---
+# Seed for reproducibility
+random_seed: 42
+
