@@ -1,0 +1,60 @@
+# Conda environment definition for AMD RNA-Seq Denoising Autoencoder Project
+name: amd_denoiser
+channels:
+  - pytorch # Prioritize PyTorch channel for its packages
+  - nvidia # For CUDA toolkit if needed directly
+  - conda-forge # Then conda-forge for broad compatibility
+  - bioconda
+  - defaults
+dependencies:
+  # --- Core ---
+  - python >=3.9
+  - pip
+
+  # --- Data Science ---
+  - numpy >=1.21
+  - pandas >=1.3
+  - scipy >=1.7
+  - scikit-learn >=1.0
+
+  # --- Plotting ---
+  - matplotlib >=3.4
+  - seaborn >=0.11
+  - umap-learn # For UMAP visualization
+
+  # --- Deep Learning (PyTorch) ---
+  # NOTE: The lines below install the basic PyTorch CPU version.
+  # For GPU acceleration on HPC, we MUST install a specific build
+  # AFTER creating the environment. 
+  # TODO: See PyTorch website (pytorch.org)
+  # or HPC documentation for the correct command based on the cluster's CUDA version.
+  # Example command (run AFTER 'conda env create'):
+  # conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+  # --- Base PyTorch Packages (CPU version by default) ---
+  - pytorch >=1.12 # Using a slightly more recent stable version range
+  - torchvision >=0.13
+  - torchaudio >=0.12
+  # --- PyTorch Ecosystem ---
+  - tensorboard # For logging and visualizing training
+
+  # --- Utilities ---
+  - jupyterlab # For notebooks
+  - ipykernel # For using this env in Jupyter
+  - pyyaml # For reading config.yaml
+  - h5py # Often useful, though not strictly required for torch.save
+  - statsmodels # Optional: for advanced EDA stats (e.g., zero-inflation tests)
+
+  # --- Pip dependencies (if any library is not on Conda) ---
+  # - pip:
+  #   - some-pip-package
+
+# --- Installation Notes ---
+# 1. Create the environment:
+#    conda env create -f environment.yaml
+#    conda activate amd_denoiser
+# 2. **IMPORTANT for GPU:** If using GPUs on HPC, install the correct PyTorch build now:
+#    Check HPC's CUDA version (e.g., run 'nvidia-smi').
+#    Find the corresponding command on pytorch.org. Example for CUDA 11.8:
+#    conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+#    (Replace '11.8' with your cluster's CUDA version, e.g., 11.7, 12.1)
+
