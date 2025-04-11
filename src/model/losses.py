@@ -5,7 +5,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def negative_binomial_loss_torch(y_true: torch.Tensor, mu: torch.Tensor, theta: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def negative_binomial_loss_torch(y_true: torch.Tensor, mu: torch.Tensor, theta: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
     Computes the Negative Binomial negative log-likelihood loss using PyTorch distributions.
 
@@ -18,6 +18,7 @@ def negative_binomial_loss_torch(y_true: torch.Tensor, mu: torch.Tensor, theta: 
     Returns:
         torch.Tensor: Scalar loss value (average negative log-likelihood over batch).
     """
+    y_true = y_true.round().long()
     if not (mu > 0).all():
         logger.warning("Non-positive values detected in mu, clamping.")
         mu = torch.clamp(mu, min=eps)
@@ -28,7 +29,7 @@ def negative_binomial_loss_torch(y_true: torch.Tensor, mu: torch.Tensor, theta: 
     # Parameterize NB using total_count (theta) and probs (mu / (mu + theta))
     # Ensure probs are within (0, 1) for stability
     probs = mu / (mu + theta)
-    probs = torch.clamp(probs, min=eps, max=1.0 - eps)
+    probs = torch.clamp(probs, min=eps, max=1 - eps)
 
     try:
         nb_dist = NegativeBinomial(total_count=theta, probs=probs)

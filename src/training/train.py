@@ -27,8 +27,10 @@ def train_epoch(model: nn.Module, dataloader: DataLoader, loss_fn, optimizer: op
 
         # Calculate loss
         if model.distribution == 'ZINB':
+            y_batch = y_batch.round().long()
             loss = loss_fn(y_batch, outputs[0], outputs[1], outputs[2])
         else: # NB
+            y_batch = y_batch.round().long()
             loss = loss_fn(y_batch, outputs[0], outputs[1])
 
         # Backward pass and optimization
@@ -55,8 +57,10 @@ def validate_epoch(model: nn.Module, dataloader: DataLoader, loss_fn, device: to
 
             # Calculate loss
             if model.distribution == 'ZINB':
+                y_batch = y_batch.round().long()
                 loss = loss_fn(y_batch, outputs[0], outputs[1], outputs[2])
             else: # NB
+                y_batch = y_batch.round().long()
                 loss = loss_fn(y_batch, outputs[0], outputs[1])
 
             total_loss += loss.item()
