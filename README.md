@@ -1,5 +1,6 @@
 # Deep Count Autoencoder for Bulk RNA-Seq Denoising in AMD Studies
 
+
 ## Project Overview
 
 This project implements and evaluates a **deep count autoencoder**, a specialized neural network architecture, designed to denoise bulk RNA-sequencing (RNA-seq) data from human retina samples in the context of Age-related Macular Degeneration (AMD). The primary objective is to improve the separation of subtle biological signals related to AMD status and progression from confounding technical noise inherent in high-throughput sequencing experiments. By leveraging a model tailored for the statistical properties of count data (using Negative Binomial or Zero-Inflated Negative Binomial distributions), this work aims to provide a cleaner expression matrix, thereby enhancing the potential for discovering robust AMD biomarkers and understanding disease mechanisms compared to analyses using raw or conventionally corrected data.
