@@ -22,6 +22,12 @@ dependencies:
   - seaborn >=0.11
   - umap-learn # For UMAP visualization
 
+  # --- Bioinformatics ---
+  - r-base=4.3  # R base for Bioconductor packages
+  # - r-deseq2
+  # - r-sva        # contains ComBat
+  - rpy2
+
   # --- Deep Learning (PyTorch) ---
   # NOTE: The lines below install the basic PyTorch CPU version.
   # For GPU acceleration on HPC, we MUST install a specific build
