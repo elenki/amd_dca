@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amd_dca"
+version = "0.1.0"
+description = "Deep Count Autoencoder for bulk retinal RNA‑seq denoising (AMD)"
+authors = [{ name = "Chetan Elenki"}, { name = "Xincen Xi" }, { name = "Nathan Losee"}]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+dev = ["black", "ruff", "pre-commit"]
