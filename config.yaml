@@ -43,14 +43,14 @@ model_ae:
   activation: "relu"
 
 # --- Model Architecture (Placeholder for VAE) ---
-# model_vae:
-#   type: "NB_VAE" # Or ZINB_VAE, Gaussian_VAE
-#   distribution: "NB"
-#   encoder_layers: [512, 128]
-#   latent_dim: 32 # VAE specific
-#   decoder_layers: [128, 512]
-#   activation: "relu"
-#   kl_weight: 1.0 # VAE specific
+model_vae:
+  type: "NB_VAE" # Or ZINB_VAE, Gaussian_VAE
+  distribution: "NB"
+  encoder_layers: [512, 128]
+  latent_dim: 32 # VAE specific
+  decoder_layers: [128, 512]
+  activation: "relu"
+  kl_weight: 1.0 # VAE specific
 
 # --- Training Hyperparameters (Common - Add VAE specific later if needed) ---
 training:
