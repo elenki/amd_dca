@@ -30,6 +30,7 @@ preprocessing:
     - "mgs_level"
     - "postmortem_interval_hrs"
     - "rin"
+    - "lib_prep_batch"
   split_ratios: # Train, Validation, Test. TODO: Adjust based on final model architecture
     train: 0.70
     validation: 0.15
