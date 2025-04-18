@@ -36,7 +36,14 @@ def setup_logging() -> None:
     logging.info("Log file: %s", logfile)
 
 # ---------------------------------------------------------------------------
-def main() -> None:
+import argparse
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--combat", action="store_true",
+                        help="also generate ComBat‑corrected counts")
+    args = parser.parse_args(argv)
+
     setup_logging()
     logging.info("Starting preprocessing script…")
 
@@ -74,6 +81,16 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     counts_final_df = preprocess.filter_genes(counts_qc, cfg)
     metadata_final_df = metadata_qc.loc[counts_final_df.index]
+
+    # ------------------------------------------------------------------ #
+    #  Optional ComBat correction baseline
+    # ------------------------------------------------------------------ #
+    if args.combat:
+        from amd_dca.r.combat import correct
+        batch_series = metadata_final_df["lib_prep_batch"].astype(str)  # batch info
+        combat_df = correct(counts_final_df, batch_series)
+        np.save(processed_dir / "combat_counts.npy", combat_df.values.astype(np.float32))
+        logging.info("Saved ComBat matrix to combat_counts.npy")
 
     # ------------------------------------------------------------------ #
     #  **Create integer copy for NB loss**
