@@ -7,7 +7,8 @@ import time
 import logging
 import os
 from typing import Dict, Any, Tuple
-from ..model import autoencoder, losses # Import relative to src
+
+from amd_dca.model import autoencoder, losses
 
 logger = logging.getLogger(__name__)
 

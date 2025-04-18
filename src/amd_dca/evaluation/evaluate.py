@@ -4,12 +4,12 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE, UMAP # Import UMAP if installed
+from sklearn.manifold import TSNE # Import UMAP if installed
 import logging
 import os
 from typing import Dict, Any, Optional
 # Assume plotting functions are in src.utils.plotting
-from ..utils import plotting
+from amd_dca.utils import plotting
 
 logger = logging.getLogger(__name__)
 
