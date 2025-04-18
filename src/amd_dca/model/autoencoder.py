@@ -1,80 +1,58 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 class CountAutoencoder(nn.Module):
     """
-    Deep Count Autoencoder model using PyTorch.
-
-    Architecture: Encoder -> Bottleneck -> Decoder -> Parameter Prediction Heads
+    A deep count autoencoder for RNA-seq denoising.
+    Supports NB or ZINB output distributions.
     """
-    def __init__(self,
-                 input_dim: int,
-                 encoder_layer_dims: List[int],
-                 bottleneck_dim: int,
-                 decoder_layer_dims: List[int],
-                 output_dim: int, # Number of genes
-                 distribution: str = 'NB', # 'NB' or 'ZINB'
-                 activation_fn: nn.Module = nn.ReLU(),
-                 dropout_rate: float = 0.0):
-        """
-        Initializes the CountAutoencoder.
-
-        Args:
-            input_dim: Dimensionality of the input (genes + covariates).
-            encoder_layer_dims: List of hidden layer sizes for the encoder.
-            bottleneck_dim: Size of the bottleneck layer.
-            decoder_layer_dims: List of hidden layer sizes for the decoder.
-            output_dim: Dimensionality of the output (number of genes).
-            distribution: Output distribution ('NB' or 'ZINB').
-            activation_fn: Activation function for hidden layers.
-            dropout_rate: Dropout probability.
-        """
+    def __init__(
+        self,
+        input_dim: int,
+        encoder_layers: List[int],
+        bottleneck_dim: int,
+        decoder_layers: List[int],
+        output_dim: int,
+        distribution: str = "NB",
+        activation: str = "relu",
+        dropout: float = 0.0,
+    ):
         super().__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
         self.distribution = distribution.upper()
-        self.dropout_rate = dropout_rate
+        act = activation
 
-        # --- Build Encoder ---
-        encoder_layers = []
-        last_dim = input_dim
-        for dim in encoder_layer_dims:
-            encoder_layers.append(nn.Linear(last_dim, dim))
-            encoder_layers.append(activation_fn)
-            if dropout_rate > 0:
-                encoder_layers.append(nn.Dropout(dropout_rate))
-            last_dim = dim
-        encoder_layers.append(nn.Linear(last_dim, bottleneck_dim))
-        encoder_layers.append(activation_fn) # Activation for bottleneck? Optional.
-        self.encoder = nn.Sequential(*encoder_layers)
+        # --- encoder ---
+        dims = [input_dim] + encoder_layers + [bottleneck_dim]
+        enc_modules = []
+        for i in range(len(dims)-1):
+            enc_modules.append(nn.Linear(dims[i], dims[i+1]))
+            enc_modules.append(act)
+            if dropout>0:
+                enc_modules.append(nn.Dropout(dropout))
+        self.encoder = nn.Sequential(*enc_modules)
 
-        # --- Build Decoder ---
-        decoder_layers_list = []
-        last_dim = bottleneck_dim
-        for dim in decoder_layer_dims:
-            decoder_layers_list.append(nn.Linear(last_dim, dim))
-            decoder_layers_list.append(activation_fn)
-            if dropout_rate > 0:
-                decoder_layers_list.append(nn.Dropout(dropout_rate))
-            last_dim = dim
-        self.decoder_base = nn.Sequential(*decoder_layers_list) # Base layers before output heads
+        # --- decoder base ---
+        dims = [bottleneck_dim] + decoder_layers
+        dec_modules = []
+        for i in range(len(dims)-1):
+            dec_modules.append(nn.Linear(dims[i], dims[i+1]))
+            dec_modules.append(act)
+            if dropout>0:
+                dec_modules.append(nn.Dropout(dropout))
+        self.decoder_base = nn.Sequential(*dec_modules)
 
-        # --- Output Heads ---
-        # Negative Binomial parameters
+        # --- output heads ---
+        last_dim = decoder_layers[-1] if decoder_layers else bottleneck_dim
         self.mean_head = nn.Linear(last_dim, output_dim)
         self.disp_head = nn.Linear(last_dim, output_dim)
-
-        if self.distribution == 'ZINB':
-            # Zero-inflation probability parameter
+        if self.distribution == "ZINB":
             self.pi_head = nn.Linear(last_dim, output_dim)
 
-        self._initialize_weights()
+        self._init_weights()
 
-
-    def _initialize_weights(self):
-        """Initialize weights using Xavier initialization."""
+    def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
@@ -82,29 +60,11 @@ class CountAutoencoder(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
-        """
-        Forward pass through the autoencoder.
-
-        Args:
-            x: Input tensor (batch_size, input_dim).
-
-        Returns:
-            Tuple of tensors representing distribution parameters.
-            For NB: (mean, dispersion)
-            For ZINB: (mean, dispersion, pi)
-        """
-        encoded = self.encoder(x)
-        decoded_base = self.decoder_base(encoded)
-
-        # Predict parameters - apply final activations here
-        # Use softplus for stability and positivity, exp can explode
-        mu = F.softplus(self.mean_head(decoded_base)) + 1e-6 # Add epsilon for numerical stability
-        # Ensure dispersion is positive and maybe constrain range
-        theta = F.softplus(self.disp_head(decoded_base)) + 1e-6
-
-        if self.distribution == 'ZINB':
-            pi = torch.sigmoid(self.pi_head(decoded_base)) # Sigmoid for probability (0, 1)
+        z = self.encoder(x)
+        h = self.decoder_base(z)
+        mu = F.softplus(self.mean_head(h)) + 1e-6
+        theta = F.softplus(self.disp_head(h)) + 1e-6
+        if self.distribution == "ZINB":
+            pi = torch.sigmoid(self.pi_head(h))
             return mu, theta, pi
-        else: # NB
-            return mu, theta
-
+        return mu, theta
