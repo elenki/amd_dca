@@ -1,30 +1,48 @@
-import argparse
-from pathlib import Path
-from amd_dca.scripts import (
-    run_preprocessing,
-    run_training,
-    run_evaluation,
-)
+"""
+Front‑end dispatcher that forwards CLI args to driver scripts.
+
+It checks the driver's `main` signature and calls it with or without the argv list
+"""
+from __future__ import annotations
+import sys, inspect
+
+def _usage() -> None:
+    print(
+        "Usage:\n"
+        "  amd_dca <command> [options]\n\n"
+        "Commands:\n"
+        "  preprocess   run data preprocessing (pass --combat, etc.)\n"
+        "  train        train the autoencoder\n"
+        "  evaluate     generate denoised matrix + PCA/UMAP\n"
+        "  dge          run DESeq2 / edgeR comparisons\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 def main() -> None:
-    parser = argparse.ArgumentParser("amd_dca")
-    sub = parser.add_subparsers(required=True, dest="cmd")
+    if len(sys.argv) < 2:
+        _usage()
 
-    sub.add_parser("preprocess")
-    sub.add_parser("train")
-    sub.add_parser("evaluate")
+    cmd, *cmd_args = sys.argv[1:]
 
-    args = parser.parse_args()
+    module_lookup = {
+        "preprocess": "amd_dca.scripts.run_preprocessing",
+        "train":      "amd_dca.scripts.run_training",
+        "evaluate":   "amd_dca.scripts.run_evaluation",
+        "dge":        "amd_dca.scripts.run_dge",
+    }
+    if cmd not in module_lookup:
+        print(f"Unknown command: {cmd!r}", file=sys.stderr)
+        _usage()
 
-    root = Path(__file__).resolve().parent.parent
-    if args.cmd == "preprocess":
-        run_preprocessing.main()
-    elif args.cmd == "train":
-        run_training.main()
-    elif args.cmd == "evaluate":
-        run_evaluation.main()
+    mod = __import__(module_lookup[cmd], fromlist=["main"])
+
+    # Call driver.main with or without argv depending on its signature
+    sig = inspect.signature(mod.main)
+    if len(sig.parameters) == 0:
+        mod.main()
     else:
-        parser.error(f"unknown command {args.cmd!r}")
+        mod.main(cmd_args)
 
 if __name__ == "__main__":
     main()
