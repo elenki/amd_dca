@@ -8,8 +8,14 @@ env:
 preprocess:
 	$(PYTHON) preprocess
 
+preprocess-combat:
+	$(PYTHON) preprocess --combat
+
 train:
 	$(PYTHON) train
+
+dge:
+	$(PYTHON) dge
 
 evaluate:
 	$(PYTHON) evaluate
