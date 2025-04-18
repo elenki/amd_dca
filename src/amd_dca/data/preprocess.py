@@ -1,240 +1,211 @@
+# src/amd_dca/data/preprocess.py
 import pandas as pd
+import numpy as np
+import re
+import logging
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
-import numpy as np
-import logging # Keep the import
-import re
-from typing import List, Tuple, Dict, Optional, Any
+from typing import Tuple, Dict, Any, Optional, List
+from pathlib import Path
 
-# Use this for simple logging configuration (just displays messages to console)
-# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Get logger instance - it will inherit configuration from the main script
-logger = logging.getLogger(__name__) # Use __name__ for module-specific logger
 
-def load_data(counts_path: str, metadata_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Loads counts and metadata."""
-    logger.info(f"Loading counts from: {counts_path}") # Use logger instance
-    # ... (rest of the function using logger.info, logger.warning, logger.error) ...
-    try:
-        counts_df = pd.read_csv(counts_path, sep='\t', index_col=0)
-        logger.info(f"Loaded counts data with shape: {counts_df.shape}")
-    except Exception as e:
-        logger.error(f"Failed to load counts data: {e}")
-        raise
+def load_data(counts_path: str,
+              metadata_path: str,
+              mapping_path: str
+             ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Load raw counts, GEO metadata, and GSM->Title mapping.
+    Returns (counts_df, metadata_df, mapping_df).
+    """
+    logger.info(f"[preprocess] Reading raw counts: {counts_path}")
+    counts_df = pd.read_csv(counts_path, sep='\t', index_col=0)
+    logger.info(f"[preprocess] Counts shape: {counts_df.shape}")
 
-    logger.info(f"Loading metadata from: {metadata_path}")
-    try:
-        metadata_df = pd.read_csv(metadata_path)
-        logger.info(f"Loaded metadata with shape: {metadata_df.shape}")
-        if 'r_id' not in metadata_df.columns:
-             logger.warning("Metadata missing expected 'r_id' column for mapping.")
-    except Exception as e:
-        logger.error(f"Failed to load metadata: {e}")
-        raise
+    logger.info(f"[preprocess] Reading metadata: {metadata_path}")
+    metadata_df = pd.read_csv(metadata_path)
+    logger.info(f"[preprocess] Metadata shape: {metadata_df.shape}")
 
-    return counts_df, metadata_df
+    logger.info(f"[preprocess] Reading mapping: {mapping_path}")
+    mapping_df = pd.read_csv(mapping_path, usecols=['Accession','Title'])
+    logger.info(f"[preprocess] Mapping shape: {mapping_df.shape}")
 
-def map_and_combine(counts_df: pd.DataFrame, metadata_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    """Maps counts columns to metadata rows and combines them."""
-    logger.info("Attempting to map and combine counts and metadata...")
+    return counts_df, metadata_df, mapping_df
 
-    # --- 1. Create linking_id in metadata ---
+def map_and_combine(
+    counts_df: pd.DataFrame,
+    metadata_df: pd.DataFrame,
+    mapping_df: pd.DataFrame
+) -> Optional[pd.DataFrame]:
+    """
+    Maps raw-counts columns (GSM accessions) to metadata rows via an
+    intermediate 'linking_id' extracted both from metadata_df['r_id']
+    and mapping_df['Title'], then returns samples×genes joined to metadata.
+
+    counts_df:   genes × samples (columns are GSM IDs)
+    metadata_df: must have 'r_id' of the form '123_4'
+    mapping_df:  must have 'Accession' (GSM...) and 'Title'
+                 e.g. 'R42015-419pf_1-IR_L7' → linking_id='419'
+    """
+    logger.info("Attempting to map and combine counts, metadata, and mapping sheet…")
+
+    # 1) Build linking_id in metadata_df
     if 'r_id' not in metadata_df.columns:
-        logger.error("Metadata requires 'r_id' column for mapping based on current strategy.")
+        logger.error("metadata_df missing required 'r_id' column.")
         return None
-    try:
-        metadata_df['r_id'] = metadata_df['r_id'].astype(str)
-        metadata_df = metadata_df.dropna(subset=['r_id'])
-        metadata_df['linking_id'] = metadata_df['r_id'].str.split('_').str[0]
-        metadata_df = metadata_df.drop_duplicates(subset=['linking_id'])
-        metadata_indexed = metadata_df.set_index('linking_id')
-        logger.info(f"Created 'linking_id' index for metadata. Shape: {metadata_indexed.shape}")
-    except Exception as e:
-        logger.error(f"Failed to create linking_id from metadata 'r_id': {e}")
+    md = metadata_df.copy()
+    md['r_id'] = md['r_id'].astype(str)
+    md = md.dropna(subset=['r_id'])
+    md['linking_id'] = md['r_id'].str.split('_').str[0]
+    # drop duplicates so each linking_id maps to one metadata record
+    md = md.drop_duplicates(subset=['linking_id'])
+    logger.info(f"[preprocess] Metadata: {len(md)} rows with {md['linking_id'].nunique()} unique linking_id.")
+
+    # 2) Build linking_id in mapping_df
+    if 'Title' not in mapping_df.columns or 'Accession' not in mapping_df.columns:
+        logger.error("mapping_df must contain 'Title' and 'Accession' columns.")
         return None
+    mp = mapping_df.copy()
+    # capture the digits before 'pf_' (e.g. 'R42015-419pf_' → '419')
+    pattern = re.compile(r'-(\d+)pf_')
+    mp['linking_id'] = mp['Title'].str.extract(pattern, expand=False)
+    n_missing = mp['linking_id'].isna().sum()
+    if n_missing:
+        logger.warning(f"[preprocess] {n_missing} mapping rows did not match pattern '-(\\d+)pf_'.")
+    mp = mp.dropna(subset=['linking_id'])
+    mp['linking_id'] = mp['linking_id'].astype(str)
+    # keep only one Accession per linking_id
+    mp = mp.drop_duplicates(subset=['linking_id'])
+    logger.info(f"[preprocess] Mapping sheet: {len(mp)} rows after extracting linking_id & deduplication.")
 
-    # --- 2. Create linking_id map from counts columns ---
-    rsem_columns = counts_df.columns.tolist()
-    rsem_id_map = {}
-    pattern = re.compile(r'pf_(\d+)-IR_')
-    unique_extracted_ids = set()
-    duplicate_check = {}
+    # 3) Build dict from GSM accession → linking_id
+    acc2link = dict(zip(mp['Accession'], mp['linking_id']))
 
-    for col_name in rsem_columns:
-        match = pattern.search(col_name)
-        if match:
-            extracted_id = match.group(1)
-            if extracted_id in duplicate_check:
-                logger.warning(f"Duplicate linking_id '{extracted_id}' found in RSEM columns: '{col_name}' and '{duplicate_check[extracted_id]}'. Skipping duplicate.")
-                continue
-            duplicate_check[extracted_id] = col_name
-            rsem_id_map[col_name] = extracted_id
-            unique_extracted_ids.add(extracted_id)
-        else:
-            logger.warning(f"Could not extract linking ID from RSEM column: {col_name}")
+    # 4) Filter & rename counts columns
+    valid_gsms = [gsm for gsm in counts_df.columns if gsm in acc2link]
+    if not valid_gsms:
+        logger.error("No GSM IDs in counts_df matched any Accession in mapping_df.")
+        return None
+    counts_subset = counts_df[valid_gsms]
+    counts_renamed = counts_subset.rename(columns=acc2link)
+    logger.info(f"[preprocess] Kept {len(valid_gsms)} of {len(counts_df.columns)} samples in counts.")
 
-    logger.info(f"Extracted {len(unique_extracted_ids)} unique linking IDs from {len(rsem_columns)} RSEM columns.")
-
-    # --- 3. Rename counts columns and Transpose ---
-    valid_rename_map = {k: v for k, v in rsem_id_map.items() if v is not None and v in unique_extracted_ids}
-    counts_subset = counts_df[list(valid_rename_map.keys())]
-    counts_renamed = counts_subset.rename(columns=valid_rename_map)
+    # 5) Transpose so samples are rows, index is linking_id
     counts_t = counts_renamed.transpose()
     counts_t.index.name = 'linking_id'
-    logger.info(f"Transposed counts shape: {counts_t.shape}")
+    logger.info(f"[preprocess] Transposed counts shape: {counts_t.shape}")
 
-    # --- 4. Join ---
-    combined_data = counts_t.join(metadata_indexed, how='inner')
-    logger.info(f"Combined data shape after inner join: {combined_data.shape}")
+    # 6) Join with metadata on linking_id
+    md_indexed = md.set_index('linking_id')
+    combined = counts_t.join(md_indexed, how='inner')
+    logger.info(f"[preprocess] Combined data shape: {combined.shape}")
 
-    if combined_data.empty:
-        logger.error("Joining counts and metadata resulted in an empty DataFrame. Check ID mapping.")
+    if combined.empty:
+        logger.error("Joining counts and metadata resulted in an empty DataFrame. Check your linking_id logic.")
         return None
 
-    logger.info(f"Example combined data index: {combined_data.index[:5].tolist()}")
-    logger.info(f"Example combined data columns (start): {combined_data.columns[:5].tolist()}")
-    logger.info(f"Example combined data columns (end): {combined_data.columns[-5:].tolist()}")
+    return combined
 
-    return combined_data
-
-# --- Other functions (filter_samples, filter_genes, split_data, prepare_covariates) ---
-# --- Make sure they also use 'logger.info/warning/error' instead of print ---
 
 def filter_samples(combined_df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
-    """Filters samples based on metadata criteria (e.g., RIN)."""
-    rin_threshold = config['preprocessing']['rin_threshold']
-    logger.info(f"Filtering samples by RIN >= {rin_threshold}...") # Use logger
-    initial_count = combined_df.shape[0]
-    if 'rin' not in combined_df.columns:
-        logger.warning("'rin' column not found in combined data. Skipping RIN filtering.") # Use logger
-        return combined_df
+    """Filter samples by RIN threshold."""
+    rin_thr = config['preprocessing']['rin_threshold']
+    logger.info(f"[preprocess] Filtering samples with RIN ≥ {rin_thr}")
+    df = combined_df.copy()
+    if 'rin' not in df.columns:
+        logger.warning("No 'rin' column found; skipping sample filter")
+        return df
+    df['rin'] = pd.to_numeric(df['rin'], errors='coerce')
+    df = df.dropna(subset=['rin'])
+    return df[df['rin'] >= rin_thr]
 
-    combined_df['rin'] = pd.to_numeric(combined_df['rin'], errors='coerce')
-    filtered_df = combined_df.dropna(subset=['rin'])
-    removed_nan = initial_count - filtered_df.shape[0]
-    if removed_nan > 0:
-        logger.warning(f"Removed {removed_nan} samples due to missing RIN values.") # Use logger
-
-    filtered_df = filtered_df[filtered_df['rin'] >= rin_threshold].copy()
-    final_count = filtered_df.shape[0]
-    logger.info(f"Samples remaining after RIN filter: {final_count} (removed {initial_count - final_count})") # Use logger
-    return filtered_df
 
 def filter_genes(counts_df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
-    """Filters genes based on minimum counts in a minimum percentage of samples."""
+    """Keep genes with ≥ min_counts in ≥ min_pct of samples."""
     min_counts = config['preprocessing']['min_counts_per_gene']
-    min_samples_pct = config['preprocessing']['min_samples_per_gene_pct']
-    logger.info(f"Filtering genes (min_count={min_counts}, min_samples_pct={min_samples_pct})...") # Use logger
-
-    n_samples = counts_df.shape[0]
-    min_samples = int(n_samples * min_samples_pct)
-
-    genes_to_keep_mask = (counts_df > min_counts).sum(axis=0) >= min_samples
-    filtered_counts_df = counts_df.loc[:, genes_to_keep_mask]
-
-    logger.info(f"Genes remaining after filtering: {filtered_counts_df.shape[1]} (removed {counts_df.shape[1] - filtered_counts_df.shape[1]})") # Use logger
-    return filtered_counts_df
-
-def split_data(sample_ids: pd.Index, metadata_df: pd.DataFrame, config: Dict[str, Any]) -> Tuple[pd.Index, pd.Index, pd.Index]:
-    """Splits sample IDs into train, validation, and test sets."""
-    test_ratio = config['preprocessing']['split_ratios']['test']
-    val_ratio = config['preprocessing']['split_ratios']['validation']
-    stratify_col = config['preprocessing'].get('stratify_on', None)
-    random_state = config['random_seed']
-    logger.info(f"Splitting data (stratify by: {stratify_col})...") # Use logger
-
-    stratify_array = metadata_df.loc[sample_ids, stratify_col].values if stratify_col and stratify_col in metadata_df.columns else None
-    if stratify_array is None and stratify_col:
-        logger.warning(f"Stratification column '{stratify_col}' not found in metadata. Performing random split.") # Use logger
-
-    try:
-        train_val_ids, test_ids = train_test_split(
-            sample_ids, test_size=test_ratio, random_state=random_state,
-            stratify=(stratify_array if stratify_array is not None else None)
-        )
-        val_ratio_adj = val_ratio / (1.0 - test_ratio)
-        stratify_array_train_val = metadata_df.loc[train_val_ids, stratify_col].values if stratify_array is not None else None
-        train_ids, val_ids = train_test_split(
-            train_val_ids, test_size=val_ratio_adj, random_state=random_state,
-            stratify=(stratify_array_train_val if stratify_array_train_val is not None else None)
-        )
-        logger.info(f"Split sizes: Train={len(train_ids)}, Validation={len(val_ids)}, Test={len(test_ids)}") # Use logger
-        return pd.Index(train_ids), pd.Index(val_ids), pd.Index(test_ids)
-
-    except Exception as e:
-         logger.error(f"Error during data splitting (check stratification column '{stratify_col}' values and ratios): {e}") # Use logger
-         logger.warning("Falling back to random split due to error.") # Use logger
-         train_val_ids, test_ids = train_test_split(sample_ids, test_size=test_ratio, random_state=random_state)
-         val_ratio_adj = val_ratio / (1.0 - test_ratio)
-         train_ids, val_ids = train_test_split(train_val_ids, test_size=val_ratio_adj, random_state=random_state)
-         logger.info(f"Fallback split sizes: Train={len(train_ids)}, Validation={len(val_ids)}, Test={len(test_ids)}") # Use logger
-         return pd.Index(train_ids), pd.Index(val_ids), pd.Index(test_ids)
+    min_pct    = config['preprocessing']['min_samples_per_gene_pct']
+    logger.info(f"[preprocess] Filtering genes: count>={min_counts} in ≥{min_pct*100:.0f}% samples")
+    n = counts_df.shape[0]
+    mask = (counts_df > min_counts).sum(axis=0) >= int(min_pct * n)
+    out = counts_df.loc[:, mask]
+    logger.info(f"[preprocess] Genes retained: {out.shape[1]} of {counts_df.shape[1]}")
+    return out
 
 
-def prepare_covariates(metadata_df: pd.DataFrame, covariate_list: List[str], train_indices: pd.Index) -> Tuple[pd.DataFrame, Optional[OneHotEncoder], Optional[StandardScaler]]:
-    """
-    Selects, encodes categorical, scales continuous covariates, handles missing values.
-    Fits scaler/encoder only on train_indices. Returns processed covariates for ALL samples.
-    """
-    logger.info(f"Preparing covariates: {covariate_list}") # Use logger
+def split_data(sample_ids: pd.Index, meta_df: pd.DataFrame, config: Dict[str, Any]
+) -> Tuple[pd.Index,pd.Index,pd.Index]:
+    """Train/val/test split stratified on config['preprocessing']['stratify_on']."""
+    strat = config['preprocessing'].get('stratify_on')
+    seed  = config['random_seed']
+    test_sz = config['preprocessing']['split_ratios']['test']
+    val_sz  = config['preprocessing']['split_ratios']['validation']
+    logger.info(f"[preprocess] Splitting: test={test_sz}, val={val_sz}, stratify={strat}")
 
-    available_covariates = [col for col in covariate_list if col in metadata_df.columns]
-    missing_req_covariates = set(covariate_list) - set(available_covariates)
-    if missing_req_covariates:
-        logger.warning(f"Requested covariates not found in metadata: {missing_req_covariates}") # Use logger
-    if not available_covariates:
-        logger.warning("No available covariates found to prepare.") # Use logger
-        return pd.DataFrame(index=metadata_df.index), None, None
+    stratify_vals = None
+    if strat and strat in meta_df.columns:
+        stratify_vals = meta_df.loc[sample_ids, strat]
+    tv, test = train_test_split(
+        sample_ids, test_size=test_sz, random_state=seed,
+        stratify=stratify_vals
+    )
+    val_adj = val_sz / (1 - test_sz)
+    stratify_tv = stratify_vals.loc[tv] if stratify_vals is not None else None
+    train, val = train_test_split(
+        tv, test_size=val_adj, random_state=seed,
+        stratify=stratify_tv
+    )
+    logger.info(f"[preprocess] Split sizes: train={len(train)}, val={len(val)}, test={len(test)}")
+    return train, val, test
 
-    covariates_df = metadata_df[available_covariates].copy()
 
-    # --- Handle Missing Values ---
-    imputation_values = {}
-    for col in covariates_df.columns:
-        if covariates_df[col].isnull().any():
-            if pd.api.types.is_numeric_dtype(covariates_df[col]):
-                fill_value = covariates_df.loc[train_indices, col].mean()
-                imputation_values[col] = fill_value
-                logger.info(f"Imputing missing numeric '{col}' with mean: {fill_value:.2f}") # Use logger
+def prepare_covariates(
+    meta_df: pd.DataFrame,
+    covs: List[str],
+    train_idx: pd.Index
+) -> Tuple[pd.DataFrame, Optional[OneHotEncoder], Optional[StandardScaler]]:
+    """One‐hot encode cats, standardize nums, fit only on train_idx."""
+    df = meta_df.copy()
+    avail = [c for c in covs if c in df.columns]
+    if not avail:
+        logger.warning("[preprocess] No covariates found → returning empty DF")
+        return pd.DataFrame(index=df.index), None, None
+
+    df_sel = df[avail].copy()
+    # impute
+    for c in avail:
+        if df_sel[c].isna().any():
+            if pd.api.types.is_numeric_dtype(df_sel[c]):
+                fill = df_sel.loc[train_idx, c].mean()
             else:
-                fill_value = covariates_df.loc[train_indices, col].mode()[0]
-                imputation_values[col] = fill_value
-                logger.info(f"Imputing missing categorical '{col}' with mode: {fill_value}") # Use logger
-            covariates_df[col] = covariates_df[col].fillna(fill_value)
+                fill = df_sel.loc[train_idx, c].mode()[0]
+            df_sel[c] = df_sel[c].fillna(fill)
 
-    # --- Identify Column Types ---
-    categorical_cols = covariates_df.select_dtypes(include=['object', 'category']).columns.tolist()
-    numerical_cols = covariates_df.select_dtypes(include=np.number).columns.tolist()
-    logger.info(f"Categorical covariates: {categorical_cols}") # Use logger
-    logger.info(f"Numerical covariates: {numerical_cols}") # Use logger
+    cats = df_sel.select_dtypes(include=['object','category']).columns.tolist()
+    nums = df_sel.select_dtypes(include=[np.number]).columns.tolist()
 
-    # --- Fit and Transform ---
-    encoder = None
-    scaler = None
-    processed_parts = []
+    parts = []
+    enc, scl = None, None
 
-    if numerical_cols:
-        scaler = StandardScaler()
-        scaler.fit(covariates_df.loc[train_indices, numerical_cols])
-        scaled_data = scaler.transform(covariates_df[numerical_cols])
-        scaled_df = pd.DataFrame(scaled_data, index=covariates_df.index, columns=numerical_cols)
-        processed_parts.append(scaled_df)
+    if nums:
+        scl = StandardScaler()
+        scl.fit(df_sel.loc[train_idx, nums])
+        parts.append(pd.DataFrame(
+            scl.transform(df_sel[nums]),
+            index=df_sel.index, columns=nums
+        ))
+    if cats:
+        enc = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+        enc.fit(df_sel.loc[train_idx, cats])
+        cols = enc.get_feature_names_out(cats)
+        parts.append(pd.DataFrame(
+            enc.transform(df_sel[cats]),
+            index=df_sel.index, columns=cols
+        ))
 
-    if categorical_cols:
-        encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-        encoder.fit(covariates_df.loc[train_indices, categorical_cols])
-        encoded_data = encoder.transform(covariates_df[categorical_cols])
-        encoded_df = pd.DataFrame(encoded_data, index=covariates_df.index, columns=encoder.get_feature_names_out())
-        processed_parts.append(encoded_df)
-
-    if processed_parts:
-        final_covariates = pd.concat(processed_parts, axis=1)
-        logger.info(f"Processed covariates shape: {final_covariates.shape}") # Use logger
-        return final_covariates, encoder, scaler
-    else:
-        logger.warning("No covariates processed.") # Use logger
-        return pd.DataFrame(index=metadata_df.index), None, None
+    covariate_df = pd.concat(parts, axis=1) if parts else pd.DataFrame(index=df_sel.index)
+    logger.info(f"[preprocess] Covariates shape: {covariate_df.shape}")
+    return covariate_df, enc, scl
 
 
 def calculate_size_factors(counts_df: pd.DataFrame) -> pd.Series:
