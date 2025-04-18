@@ -1,166 +1,110 @@
 from __future__ import annotations
-# ---------------------------------------------------------------------------
-#  RUN_PREPROCESSING  —  create train/val/test NPZ with integer targets
-# ---------------------------------------------------------------------------
-import logging, datetime, json, pickle
+import argparse, logging, datetime, json, pickle
 from pathlib import Path
-
 import numpy as np
-from amd_dca.utils.helpers import (
-    find_repo_root,
-    load_config,
-    set_seed,
-)
+import pandas as pd
+
+from amd_dca.utils.helpers import find_repo_root, load_config, set_seed
 from amd_dca.data import preprocess
 
-# ---------------------------------------------------------------------------
-# CONSTANTS
-# ---------------------------------------------------------------------------
-REPO_ROOT: Path = find_repo_root()          # repo top‑level (contains config.yaml)
-CONFIG_PATH: Path = REPO_ROOT / "config.yaml"
-DATA_DIR: Path = REPO_ROOT / "data"
-LOG_DIR: Path = REPO_ROOT / "logs"
-SCRIPT_NAME = Path(__file__).stem           # 'run_preprocessing'
+# --------------------------------------------------------------------- #
+REPO_ROOT   = find_repo_root()
+CONFIG_PATH = REPO_ROOT / "config.yaml"
+RAW_DIR     = REPO_ROOT / "data" / "raw"
+PROC_DIR    = REPO_ROOT / "data" / "processed"
+LOG_DIR     = REPO_ROOT / "logs"
+SCRIPT      = Path(__file__).stem
+# --------------------------------------------------------------------- #
 
-# ---------------------------------------------------------------------------
-def setup_logging() -> None:
+def setup_logging():
     LOG_DIR.mkdir(exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    logfile = LOG_DIR / f"{SCRIPT_NAME}_{ts}.log"
-
+    logfile = LOG_DIR / f"{SCRIPT}_{ts}.log"
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - [%(module)s.%(funcName)s] - %(message)s",
-        handlers=[logging.FileHandler(logfile, mode="w"), logging.StreamHandler()]
+        format="%(asctime)s - %(levelname)s - [%(module)s] %(message)s",
+        handlers=[logging.FileHandler(logfile), logging.StreamHandler()],
     )
     logging.info("Log file: %s", logfile)
 
-# ---------------------------------------------------------------------------
-import argparse
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--combat", action="store_true",
-                        help="also generate ComBat‑corrected counts")
+    # no flags: always compute full set
     args = parser.parse_args(argv)
 
     setup_logging()
-    logging.info("Starting preprocessing script…")
-
     cfg = load_config(CONFIG_PATH)
-    set_seed(cfg["random_seed"])
+    set_seed(cfg["random_seed"] if "random_seed" in cfg else cfg.get("random_seed", 42))
 
-    raw_dir       = DATA_DIR / "raw"
-    processed_dir = DATA_DIR / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
+    PROC_DIR.mkdir(parents=True, exist_ok=True)
 
-    dataset = next(iter(cfg["datasets"].keys()))          # e.g. 'gse115828'
-    counts_path = raw_dir / cfg["datasets"][dataset]["counts_file"]
-    meta_path   = raw_dir / cfg["datasets"][dataset]["metadata_file"]
+    ds = next(iter(cfg["datasets"]))  # e.g. 'gse115828'
+    paths = cfg["datasets"][ds]
+    counts_f    = RAW_DIR / paths["counts_file"]
+    meta_f      = RAW_DIR / paths["metadata_file"]
+    map_f       = RAW_DIR / paths["mapping_file"]
 
-    # ------------------------------------------------------------------ #
-    #  Load & ID‑map
-    # ------------------------------------------------------------------ #
-    raw_counts_df, metadata_df = preprocess.load_data(counts_path, meta_path)
-    combined = preprocess.map_and_combine(raw_counts_df, metadata_df)
-    if combined is None:
-        logging.error("ID mapping failed, aborting.")
-        return
+    # 1) load + map to 'linking_id'
+    counts_df, meta_df = preprocess.load_data(counts_f, meta_f, map_f)
 
-    combined_qc = preprocess.filter_samples(combined, cfg)
+    # 2) QC: sample & gene filters
+    df = preprocess.filter_samples(counts_df.join(meta_df), cfg)
+    gene_cols = [c for c in df.columns if c not in meta_df.columns]
+    meta_cols = [c for c in df.columns if c in meta_df.columns]
+    counts_qc = df[gene_cols]
+    meta_qc   = df[meta_cols]
+    counts_filt = preprocess.filter_genes(counts_qc, cfg)
+    meta_filt   = meta_qc.loc[counts_filt.index]
 
-    gene_prefix = cfg["preprocessing"]["gene_cols_prefix"]
-    gene_cols = [c for c in combined_qc.columns if c.startswith(gene_prefix)]
-    meta_cols = [c for c in cfg["preprocessing"]["metadata_cols"] if c in combined_qc.columns]
+    # 3) size factors & log-CPM & ComBat
+    sf = preprocess.calculate_size_factors(counts_filt)
+    np.save(PROC_DIR / "size_factors.npy", sf.values)
+    logcpm = np.log2((counts_filt.div(sf, axis=0) * 1e6) + 1.0)
+    np.save(PROC_DIR / "logcpm.npy", logcpm.values)
+    # ComBat
+    combat = preprocess.run_combat(counts_filt, meta_filt[ cfg["preprocessing"]["stratify_on"] ])
+    np.save(PROC_DIR / "combat_counts.npy", combat.values)
 
-    counts_qc = combined_qc[gene_cols]
-    metadata_qc = combined_qc[meta_cols]
+    # 4) integer raw counts
+    raw_int = counts_filt.round().astype(int)
+    np.save(PROC_DIR / "raw_counts_int.npy", raw_int.values)
 
-    # ------------------------------------------------------------------ #
-    #  Gene filter  ➜  counts_final_df   (still floats)
-    # ------------------------------------------------------------------ #
-    counts_final_df = preprocess.filter_genes(counts_qc, cfg)
-    metadata_final_df = metadata_qc.loc[counts_final_df.index]
+    # 5) splits
+    train_ids, val_ids, test_ids = preprocess.split_data(raw_int.index, meta_filt, cfg)
+    manifest = {"train": train_ids.tolist(),
+                "validation": val_ids.tolist(),
+                "test": test_ids.tolist()}
+    (PROC_DIR / "split_manifest.json").write_text(json.dumps(manifest, indent=2))
 
-    # ------------------------------------------------------------------ #
-    #  Optional ComBat correction baseline
-    # ------------------------------------------------------------------ #
-    if args.combat:
-        from amd_dca.r.combat import correct
-        batch_series = metadata_final_df["lib_prep_batch"].astype(str)  # batch info
-        combat_df = correct(counts_final_df, batch_series)
-        np.save(processed_dir / "combat_counts.npy", combat_df.values.astype(np.float32))
-        logging.info("Saved ComBat matrix to combat_counts.npy")
+    # 6) covariates
+    covs, encoder, scaler = preprocess.prepare_covariates(meta_filt,
+        cfg["preprocessing"]["covariates"], train_ids)
+    pickle.dump(covs, open(PROC_DIR / "covariates_df.pkl", "wb"))
+    if encoder: pickle.dump(encoder, open(PROC_DIR / "encoder.pkl", "wb"))
+    if scaler: pickle.dump(scaler, open(PROC_DIR / "scaler.pkl", "wb"))
 
-    # ------------------------------------------------------------------ #
-    #  **Create integer copy for NB loss**
-    # ------------------------------------------------------------------ #
-    counts_final_int = counts_final_df.round().astype(int)
+    # 7) assemble DL inputs (log1p + cov → X; raw_int → Y)
+    def _assemble(ids):
+        X = np.concatenate([np.log1p(counts_filt.loc[ids].values), covs.loc[ids].values], axis=1)
+        Y = raw_int.loc[ids].values
+        return X, Y
+    Xtr, Ytr = _assemble(train_ids)
+    Xva, Yva = _assemble(val_ids)
+    Xte, Yte = _assemble(test_ids)
+    np.savez_compressed(PROC_DIR / "preprocessed_data.npz",
+                        X_train=Xtr, Y_train=Ytr,
+                        X_val=Xva,   Y_val=Yva,
+                        X_test=Xte,  Y_test=Yte)
 
-    # ------------------------------------------------------------------ #
-    #  Train/Val/Test split
-    # ------------------------------------------------------------------ #
-    train_ids, val_ids, test_ids = preprocess.split_data(
-        counts_final_df.index, metadata_final_df, cfg
-    )
-    split_manifest = {
-        "train": train_ids.tolist(),
-        "validation": val_ids.tolist(),
-        "test": test_ids.tolist(),
-    }
-    (processed_dir / "train_val_test_split.json").write_text(
-        json.dumps(split_manifest, indent=2)
-    )
-    logging.info("Saved train/val/test split manifest.")
+    # 8) gene/sample lists
+    pd.Series(counts_filt.columns).to_csv(PROC_DIR / "genes.txt",
+        index=False, header=False)
+    pd.Series(train_ids).to_csv(PROC_DIR / "train_ids.txt", index=False, header=False)
+    pd.Series(val_ids).to_csv(PROC_DIR / "val_ids.txt", index=False, header=False)
+    pd.Series(test_ids).to_csv(PROC_DIR / "test_ids.txt", index=False, header=False)
 
-    # ------------------------------------------------------------------ #
-    #  Covariates
-    # ------------------------------------------------------------------ #
-    covariate_cols = cfg["preprocessing"].get("covariates", [])
-    if covariate_cols:
-        cov_all, enc, scl = preprocess.prepare_covariates(
-            metadata_final_df, covariate_cols, train_ids
-        )
-        if enc:
-            pickle.dump(enc, open(processed_dir / "fitted_encoder.pkl", "wb"))
-        if scl:
-            pickle.dump(scl, open(processed_dir / "fitted_scaler.pkl", "wb"))
-    else:
-        cov_all = metadata_final_df.loc[:, []]  # empty DF
+    logging.info("Preprocessing complete. Files in %s", PROC_DIR)
 
-    # ------------------------------------------------------------------ #
-    #  Assemble model inputs  (X: floats)  and targets  (Y: integers)
-    # ------------------------------------------------------------------ #
-    y_train = counts_final_int.loc[train_ids].values
-    y_val   = counts_final_int.loc[val_ids].values
-    y_test  = counts_final_int.loc[test_ids].values
-
-    x_train = np.concatenate([
-        np.log1p(counts_final_df.loc[train_ids].values),
-        cov_all.loc[train_ids].values], axis=1)
-    x_val   = np.concatenate([
-        np.log1p(counts_final_df.loc[val_ids].values),
-        cov_all.loc[val_ids].values], axis=1)
-    x_test  = np.concatenate([
-        np.log1p(counts_final_df.loc[test_ids].values),
-        cov_all.loc[test_ids].values], axis=1)
-
-    np.savez_compressed(
-        processed_dir / "preprocessed_data.npz",
-        X_train=x_train, Y_train=y_train,
-        X_val=x_val, Y_val=y_val,
-        X_test=x_test, Y_test=y_test,
-    )
-
-    counts_final_df.columns.to_series().to_csv(
-        processed_dir / "final_gene_list.txt", index=False, header=False
-    )
-    train_ids.to_series().to_csv(processed_dir / "train_sample_ids.txt", index=False, header=False)
-    val_ids.to_series().to_csv(processed_dir / "val_sample_ids.txt",   index=False, header=False)
-    test_ids.to_series().to_csv(processed_dir / "test_sample_ids.txt", index=False, header=False)
-
-    logging.info("Preprocessing complete.  Outputs written to %s", processed_dir)
-
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
