@@ -1,14 +1,16 @@
+#!/usr/bin/env python
+# src/amd_dca/scripts/run_ml_baseline_2.py
+
 from __future__ import annotations
-import logging, datetime
+import logging
+import datetime
 from pathlib import Path
 
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.multioutput import MultiOutputRegressor
 
 from amd_dca.utils.helpers import find_repo_root, load_config, set_seed
 
-# --------------------------------------------------------------------- #
 def setup_logging(logdir: Path, name: str) -> None:
     logdir.mkdir(exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
@@ -20,42 +22,50 @@ def setup_logging(logdir: Path, name: str) -> None:
     )
     logging.info("Log file: %s", logfile)
 
-# --------------------------------------------------------------------- #
 def main(argv=None) -> None:
-    # --- logging & config ---
-    repo = find_repo_root()
+    # — Logging & config —
+    repo   = find_repo_root()
     LOGDIR = repo / "logs"
     setup_logging(LOGDIR, "run_ml_baseline_2")
+
     cfg = load_config(repo / "config.yaml")
     set_seed(cfg["random_seed"])
 
-    # --- paths & data load ---
+    # — Load processed data —
     PROC = repo / "data" / "processed"
-    npz = np.load(PROC / "preprocessed_data.npz")
-    X_train, Y_train = npz["X_train"], npz["Y_train"]
-    X_test  = npz["X_test"]
+    data = np.load(PROC / "preprocessed_data.npz")
+    X_train, Y_train = data["X_train"], data["Y_train"]
+    X_test          = data["X_test"]
 
-    # --- hyperparameters (fall back to defaults if not in config) ---
-    rf_cfg = cfg.get("baseline_rf", {})
-    n_estimators = rf_cfg.get("n_estimators", 10) # number of trees
-    max_depth    = rf_cfg.get("max_depth", None)
-    logging.info(f"RandomForest denoising: n_estimators={n_estimators}, max_depth={max_depth}")
+    # — Pull RF params from config —
+    try:
+        rf_cfg      = cfg["baseline_rf"]
+        n_estimators = rf_cfg["n_estimators"]
+        max_depth    = rf_cfg["max_depth"]
+        n_jobs       = rf_cfg["n_jobs"]
+    except KeyError as e:
+        raise KeyError(f"Missing baseline_rf parameter in config.yaml: {e}")
 
-    # --- fit multi-output RF ---
-    base_rf = RandomForestRegressor(
-        n_estimators = n_estimators,
-        max_depth    = max_depth,
-        random_state = cfg["random_seed"],
-        n_jobs       = -1,
+    logging.info(
+        "RandomForest denoising: n_estimators=%s, max_depth=%s, n_jobs=%s",
+        n_estimators, max_depth, n_jobs
     )
-    model = MultiOutputRegressor(base_rf)
+
+    # — Fit a multi‑output RandomForestRegressor —
+    model = RandomForestRegressor(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        n_jobs=n_jobs,
+        random_state=cfg["random_seed"],
+        verbose=0
+    )
     model.fit(X_train, Y_train)
 
-    # --- predict & save ---
+    # — Predict and save —
     Y_pred = model.predict(X_test)
     out_f  = PROC / "rf_denoised_test.npy"
     np.save(out_f, Y_pred)
-    logging.info("Saved RF‐denoised test counts to %s", out_f)
+    logging.info("Saved RF‑denoised test counts to %s", out_f)
 
 if __name__ == "__main__":
     main()
