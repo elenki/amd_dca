@@ -1,6 +1,8 @@
 #!/usr/bin/env python
+# src/amd_dca/scripts/run_evaluation.py
+
 from __future__ import annotations
-import logging, datetime, json
+import argparse, logging, datetime
 from pathlib import Path
 
 import numpy as np
@@ -13,12 +15,12 @@ import matplotlib.pyplot as plt
 from amd_dca.utils.helpers import find_repo_root, load_config, set_seed
 from amd_dca.model.autoencoder import CountAutoencoder
 
-# — paths & constants —
+# ── Paths & Constants ────────────────────────────────────────────────────────
 REPO        = find_repo_root()
 CFG_PATH    = REPO / "config.yaml"
 PROC_DIR    = REPO / "data" / "processed"
-RESULTS_DIR = REPO / "results" / "evaluation"
 MODEL_DIR   = REPO / "results" / "models"
+OUTDIR      = REPO / "results" / "evaluation"
 LOG_DIR     = REPO / "logs"
 SCRIPT      = Path(__file__).stem
 
@@ -28,96 +30,143 @@ def setup_logging():
     lf = LOG_DIR / f"{SCRIPT}_{ts}.log"
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - [%(module)s] %(message)s",
-        handlers=[logging.FileHandler(lf), logging.StreamHandler()],
+        format="%(asctime)s - %(levelname)s - [%(module)s] - %(message)s",
+        handlers=[logging.FileHandler(lf, "w"), logging.StreamHandler()]
     )
     logging.info("Log file: %s", lf)
 
-def make_scatter(emb, labels, title, out_png, out_svg):
-    plt.figure()
-    scatter = plt.scatter(emb[:,0], emb[:,1], c=labels, cmap="Spectral", s=5)
+def load_matrix(method: str, Y_test: np.ndarray) -> np.ndarray:
+    """
+    Given the method, return the raw or denoised test‐matrix.
+    """
+    if method == "raw":
+        return Y_test
+    if method in ("knn", "rf", "nb_ae", "nb_vae", "combat"):
+        path = PROC_DIR / (
+            "combat_counts.npy" if method == "combat"
+            else f"{method}_denoised_test.npy"
+        )
+        return np.load(path)
+    raise ValueError(f"Unknown evaluation method: {method!r}")
+
+def load_dl_model(cfg: dict, method: str, input_dim: int, output_dim: int, device: torch.device):
+    """
+    Instantiate and load AE or VAE model weights.
+    """
+    mcfg = cfg["model_ae"] if method == "nb_ae" else cfg["model_vae"]
+    ModelClass = CountAutoencoder  # you could swap in a VAE class here
+    model = ModelClass(
+        input_dim=input_dim,
+        encoder_layer_dims=mcfg["encoder_layers"],
+        bottleneck_dim=mcfg.get("bottleneck_size", mcfg.get("latent_dim")),
+        decoder_layer_dims=mcfg["decoder_layers"],
+        output_dim=output_dim,
+        distribution=mcfg["distribution"],
+        activation_fn=torch.nn.ReLU() if mcfg["activation"]=="relu" else torch.nn.SELU(),
+        dropout_rate=cfg["training"].get("dropout_rate",0.0),
+    ).to(device)
+    ckpt = MODEL_DIR / f"{mcfg['type']}_best.pt"
+    model.load_state_dict(torch.load(ckpt, map_location=device))
+    model.eval()
+    return model
+
+def denoise_with_model(model: torch.nn.Module, X: np.ndarray, device: torch.device) -> np.ndarray:
+    """
+    Predict the NB mean parameter for each sample.
+    """
+    ds = torch.utils.data.DataLoader(
+        torch.FloatTensor(X),
+        batch_size=cfg["training"]["batch_size"],
+        shuffle=False
+    )
+    all_mu = []
+    with torch.no_grad():
+        for xb in ds:
+            xb = xb.to(device)
+            out = model(xb)
+            all_mu.append(out[0].cpu().numpy())
+    return np.vstack(all_mu)
+
+def make_scatter(emb: np.ndarray, labels: np.ndarray, title: str, save_png: Path, save_svg: Path):
+    plt.figure(figsize=(6,5))
+    plt.scatter(emb[:,0], emb[:,1], c=labels, cmap="Spectral", s=5)
     plt.title(title)
-    plt.colorbar(scatter, label="mgs_level")
+    plt.colorbar(label="mgs_level")
     plt.tight_layout()
-    plt.savefig(out_png)
-    plt.savefig(out_svg)
+    plt.savefig(save_png)
+    plt.savefig(save_svg)
     plt.close()
 
-def main():
+def main(argv=None):
     setup_logging()
+    p = argparse.ArgumentParser(prog="run_evaluation")
+    p.add_argument(
+        "--input",
+        choices=["knn","rf","nb_ae","nb_vae","combat"],
+        required=True,
+        help="Which denoiser to compare vs raw"
+    )
+    args = p.parse_args(argv)
+
     cfg = load_config(CFG_PATH)
     set_seed(cfg["random_seed"])
 
     # load test split
-    npz = np.load(PROC_DIR / "preprocessed_data.npz")
-    X_test = npz["X_test"]       # log1p(counts) + covariates
-    Y_test = npz["Y_test"]       # integer raw counts
-    # load sample IDs & metadata for coloring
-    test_ids = pd.read_csv(PROC_DIR / "test_ids.txt", header=None)[0].astype(str)
-    # Re-load metadata so we can grab mgs_level
-    raw_meta = pd.read_csv(REPO / "data" / "raw" / cfg["datasets"][list(cfg["datasets"])[0]]["metadata_file"])
-    meta = raw_meta.set_index("r_id")  # or however you index
-    # extract mgs_level per test sample.  Here we assume r_id == linking_id
-    mgs = meta.loc[test_ids, cfg["preprocessing"]["stratify_on"]].astype(int).values
+    npz     = np.load(PROC_DIR / "preprocessed_data.npz")
+    X_test  = npz["X_test"]
+    Y_test  = npz["Y_test"]
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    # — 1) Load AE model & denoise —
-    ae_cfg = cfg["model_ae"]
-    model_path = MODEL_DIR / f"{ae_cfg['type']}_best.pt"
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # sample IDs and metadata
+    ids_t   = pd.read_csv(PROC_DIR / "test_ids.txt", header=None, dtype=str)[0].tolist()
+    raw_meta = pd.read_csv(REPO / "data" / "raw" / cfg["datasets"]["gse115828"]["metadata_file"])
+    raw_meta["linking_id"] = raw_meta["r_id"].astype(str).str.split("_").str[0]
+    meta    = raw_meta.set_index("linking_id").loc[ids_t]
+    labels  = meta[cfg["preprocessing"]["stratify_on"]].astype(int).values
 
-    model = CountAutoencoder(
-        input_dim       = X_test.shape[1],
-        encoder_layers  = ae_cfg["encoder_layers"],
-        bottleneck_dim  = ae_cfg["bottleneck_size"],
-        decoder_layers  = ae_cfg["decoder_layers"],
-        output_dim      = Y_test.shape[1],
-        distribution    = ae_cfg["distribution"],
-        activation      = ae_cfg["activation"],
-        dropout         = cfg["training"].get("dropout_rate",0.0),
-    ).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
+    OUTDIR.mkdir(parents=True, exist_ok=True)
 
-    with torch.no_grad():
-        X_t = torch.FloatTensor(X_test).to(device)
-        outs = model(X_t)
-        mu_hat = outs[0].cpu().numpy()  # NB → (batch, genes)
+    # 1) get denoised Y_hat
+    if args.input in ("nb_ae","nb_vae"):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model  = load_dl_model(cfg, args.input, X_test.shape[1], Y_test.shape[1], device)
+        Y_hat  = denoise_with_model(model, X_test, device)
+    else:
+        Y_hat = load_matrix(args.input, Y_test)
 
-    # save denoised matrix
-    np.save(RESULTS_DIR / "ae_denoised_test.npy", mu_hat)
-    logging.info("Saved AE-denoised test matrix")
+    # save out
+    np.save(OUTDIR / f"{args.input}_denoised_test.npy", Y_hat)
+    logging.info("Saved %s‐denoised test matrix", args.input)
 
-    # — 2) PCA & UMAP on raw vs denoised —
-    pca_n = cfg["evaluation"]["pca_components"]
-    umap_n = cfg["evaluation"]["umap_components"]
-    formats = cfg["evaluation"]["plot_formats"]
-    comps = {"raw": Y_test, "ae": mu_hat}
+    # 2) PCA & UMAP
+    pca_n    = cfg["evaluation"]["pca_components"]
+    umap_n   = cfg["evaluation"]["umap_components"]
+    formats  = cfg["evaluation"]["plot_formats"]
 
-    for name, mat in comps.items():
+    # raw vs method
+    mats = {"raw": Y_test, args.input: Y_hat}
+
+    for name, mat in mats.items():
         # PCA
-        pca = PCA(n_components=pca_n)
-        pc = pca.fit_transform(mat)
-        for fmt in formats:
-            plt.figure()
-            plt.scatter(pc[:,0], pc[:,1], c=mgs, cmap="Spectral", s=5)
-            plt.title(f"{name.upper()} PCA ({name})")
-            plt.tight_layout()
-            out = RESULTS_DIR / f"{name}_pca.{fmt}"
-            plt.savefig(out)
-            plt.close()
+        pca = PCA(n_components=pca_n).fit_transform(np.log1p(mat))
+        for ext in formats:
+            make_scatter(
+                pca, labels,
+                title=f"{name.upper()} PCA",
+                save_png=OUTDIR / f"{name}_pca.{ext}",
+                save_svg=OUTDIR / f"{name}_pca.{ext.replace('png','svg')}"
+            )
         # UMAP
-        um = umap.UMAP(n_components=umap_n, random_state=cfg["random_seed"]).fit_transform(mat)
-        for fmt in formats:
-            plt.figure()
-            plt.scatter(um[:,0], um[:,1], c=mgs, cmap="Spectral", s=5)
-            plt.title(f"{name.upper()} UMAP ({name})")
-            plt.tight_layout()
-            out = RESULTS_DIR / f"{name}_umap.{fmt}"
-            plt.savefig(out)
-            plt.close()
+        umap_emb = umap.UMAP(n_components=umap_n, random_state=cfg["random_seed"])\
+                        .fit_transform(mat)
+        for ext in formats:
+            make_scatter(
+                umap_emb, labels,
+                title=f"{name.upper()} UMAP",
+                save_png=OUTDIR / f"{name}_umap.{ext}",
+                save_svg=OUTDIR / f"{name}_umap.{ext.replace('png','svg')}"
+            )
 
-    logging.info("Evaluation plots saved in %s", RESULTS_DIR)
+    logging.info("Evaluation complete. Plots in %s", OUTDIR)
 
 if __name__ == "__main__":
     main()
