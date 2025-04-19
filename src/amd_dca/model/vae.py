@@ -1,3 +1,5 @@
+# src/amd_dca/model/vae.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,20 +21,38 @@ class CountVAE(nn.Module):
         decoder_layers: List[int],
         output_dim: int,
         distribution: str = "NB",        # "NB" or "ZINB"
-        activation_fn: nn.Module = nn.ReLU(),
-        dropout_rate: float = 0.0,
+        activation: str = "relu",        # "relu", "selu", "leaky_relu", or nn.Module
+        dropout: float = 0.0,
     ):
         super().__init__()
         self.distribution = distribution.upper()
-        self.latent_dim = latent_dim
+        self.latent_dim  = latent_dim
+        self.dropout     = dropout
+
+        # 1) map activation string → nn.Module
+        if isinstance(activation, str):
+            act = activation.lower()
+            if act == "relu":
+                act_fn = nn.ReLU()
+            elif act == "selu":
+                act_fn = nn.SELU()
+            elif act == "leaky_relu":
+                act_fn = nn.LeakyReLU()
+            else:
+                raise ValueError(f"Unknown activation: {activation}")
+        elif isinstance(activation, nn.Module):
+            act_fn = activation
+        else:
+            raise TypeError("activation must be a string or an nn.Module")
 
         # --- Encoder MLP ---
         enc_modules: List[nn.Module] = []
         last = input_dim
         for h in encoder_layers:
-            enc_modules += [nn.Linear(last, h), activation_fn]
-            if dropout_rate > 0:
-                enc_modules.append(nn.Dropout(dropout_rate))
+            enc_modules.append(nn.Linear(last, h))
+            enc_modules.append(act_fn)
+            if dropout > 0:
+                enc_modules.append(nn.Dropout(dropout))
             last = h
         self.encoder_net = nn.Sequential(*enc_modules)
 
@@ -44,9 +64,10 @@ class CountVAE(nn.Module):
         dec_modules: List[nn.Module] = []
         last = latent_dim
         for h in decoder_layers:
-            dec_modules += [nn.Linear(last, h), activation_fn]
-            if dropout_rate > 0:
-                dec_modules.append(nn.Dropout(dropout_rate))
+            dec_modules.append(nn.Linear(last, h))
+            dec_modules.append(act_fn)
+            if dropout > 0:
+                dec_modules.append(nn.Dropout(dropout))
             last = h
         self.decoder_net = nn.Sequential(*dec_modules)
 

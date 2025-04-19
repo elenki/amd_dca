@@ -23,15 +23,17 @@ preprocessing:
     - "lib_prep_batch"
     - "library_prepper"
   split_ratios: # Train, Validation, Test. TODO: Adjust based on final model architecture
-    train: 0.70
-    validation: 0.15
-    test: 0.15
+    train: 0.80
+    validation: 0.10
+    test: 0.10
   stratify_on: "mgs_level" 
   covariates: 
     - "age"
     - "sex"
     - "rin"
     - "postmortem_interval_hrs"
+    - "lib_prep_batch"
+    - "library_prepper"
 
 # --- Model Architecture (Example for NB-AE - Add VAE section later) ---
 model_ae:
@@ -50,7 +52,7 @@ model_vae:
   latent_dim: 32 # VAE specific
   decoder_layers: [128, 512]
   activation: "relu"
-  kl_weight: 1.0 # VAE specific
+  kl_weight: 0.5 # VAE specific
 
 # --- Training Hyperparameters (Common - Add VAE specific later if needed) ---
 training:
@@ -58,18 +60,18 @@ training:
   learning_rate: 0.0001
   batch_size: 64
   epochs: 200
-  early_stopping_patience: 15
+  early_stopping_patience: 20
   optimizer: "adamw" # AdamW often preferred
   dropout_rate: 0.1
 
 # --- Baseline Model Parameters (Optional - can be hardcoded or set here) ---
-# baseline_knn:
-#   n_neighbors: 5
-#   pca_components: 50
-# baseline_rf:
-#   n_estimators: 100
-#   max_depth: null
-
+baseline_knn:
+  n_neighbors: 5
+  pca_components: 50
+baseline_rf:
+  n_estimators: 100
+  max_depth: 10    # or null
+  n_jobs: -1       # use -1 to auto‐detect all cores
 # --- DGE Analysis ---
 dge:
   contrast_variable: "mgs_level"
