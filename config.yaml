@@ -78,6 +78,8 @@ dge:
   contrast_level_1: "4" # Numerator (e.g., Diseased)
   contrast_level_2: "1" # Denominator (e.g., Control)
   padj_threshold: 0.05
+  fc_threshold: 1.0
+  volcano_top_n: 10
 
 # --- Evaluation ---
 evaluation:
